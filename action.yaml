@@ -29,6 +29,10 @@ inputs:
     description: "Additional arguments to pass to makepkg."
     required: false
     default: ""
+  repoName:
+    description: "Name for the repository to be created"
+    require: false
+    default: "pkgbuild-action"
 outputs:
   pkgfile0:
     description: "Filename of the first generated package archive. Usually only one."

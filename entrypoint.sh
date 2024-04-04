@@ -122,3 +122,12 @@ function namcap_check() {
 if [ -z "${INPUT_NAMCAPDISABLE:-}" ]; then
 	namcap_check
 fi
+
+mkdir $GITHUB_WORKSPACE/repo
+mv $GITHUB_WORKSPACE/$INPUT_PKGDIR/*.tar.zst $GITHUB_WORKSPACE/repo
+cd $GITHUB_WORKSPACE/repo
+repo-add -v $INPUT_REPONAME.db.tar.gz *.zst
+rm $INPUT_REPONAME.db $INPUT_REPONAME.files
+cp $INPUT_REPONAME.db.tar.gz $INPUT_REPONAME.db
+cp $INPUT_REPONAME.files.tar.gz $INPUT_REPONAME.files
+
