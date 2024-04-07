@@ -30,8 +30,8 @@ inputs:
     required: false
     default: ""
   repoName:
-    description: "Name for the repository to be created"
-    require: false
+    description: "Name for the repository to be created."
+    required: false
     default: "pkgbuild-action"
 outputs:
   pkgfile0:

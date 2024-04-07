@@ -24,110 +24,123 @@ echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 chmod -R a+rw .
 
 BASEDIR="$PWD"
-cd "${INPUT_PKGDIR:-.}"
 
-# Assume that if .SRCINFO is missing then it is generated elsewhere.
-# AUR checks that .SRCINFO exists so a missing file can't go unnoticed.
-if [ -f .SRCINFO ] && ! sudo -u builder makepkg --printsrcinfo | diff - .SRCINFO; then
-	echo "::error file=$FILE,line=$LINENO::Mismatched .SRCINFO. Update with: makepkg --printsrcinfo > .SRCINFO"
-	exit 1
-fi
+# Create the repo directory
+if [ -d $GITHUB_WORKSPACE/repo ]; then rm -rf $GITHUB_WORKSPACE/repo; fi
+mkdir $GITHUB_WORKSPACE/repo
 
-# Optionally install dependencies from AUR
-if [ -n "${INPUT_AURDEPS:-}" ]; then
-	# First install yay
-	pacman -S --noconfirm --needed git
-	git clone https://aur.archlinux.org/yay-bin.git /tmp/yay
-	pushd /tmp/yay
-	chmod -R a+rw .
-	sudo -H -u builder makepkg --syncdeps --install --noconfirm
-	popd
+eval "array=($INPUT_PKGDIR)"
 
-	# Extract dependencies from .SRCINFO (depends or depends_x86_64) and install
-	mapfile -t PKGDEPS < \
-		<(sed -n -e 's/^[[:space:]]*\(make\)\?depends\(_x86_64\)\? = \([[:alnum:][:punct:]]*\)[[:space:]]*$/\3/p' .SRCINFO)
-	sudo -H -u builder yay --sync --noconfirm "${PKGDEPS[@]}"
-fi
+# Use the elements of the array
+for element in "${array[@]}"; do
 
-# Make the builder user the owner of these files
-# Without this, (e.g. only having every user have read/write access to the files),
-# makepkg will try to change the permissions of the files itself which will fail since it does not own the files/have permission
-# we can't do this earlier as it will change files that are for github actions, which results in warnings in github actions logs.
-chown -R builder .
+	cd "${element:-.}"
 
-# Build packages
-# INPUT_MAKEPKGARGS is intentionally unquoted to allow arg splitting
-# shellcheck disable=SC2086
-sudo -H -u builder makepkg --syncdeps --noconfirm ${INPUT_MAKEPKGARGS:-}
-
-# Get array of packages to be built
-mapfile -t PKGFILES < <( sudo -u builder makepkg --packagelist )
-echo "Package(s): ${PKGFILES[*]}"
-
-# Report built package archives
-i=0
-for PKGFILE in "${PKGFILES[@]}"; do
-	# makepkg reports absolute paths, must be relative for use by other actions
-	RELPKGFILE="$(realpath --relative-base="$BASEDIR" "$PKGFILE")"
-	# Caller arguments to makepkg may mean the pacakge is not built
-	if [ -f "$PKGFILE" ]; then
-		echo "::set-output name=pkgfile$i::$RELPKGFILE"
-	else
-		echo "Archive $RELPKGFILE not built"
+	# Assume that if .SRCINFO is missing then it is generated elsewhere.
+	# AUR checks that .SRCINFO exists so a missing file can't go unnoticed.
+	if [ -f .SRCINFO ] && ! sudo -u builder makepkg --printsrcinfo | diff - .SRCINFO; then
+		echo "::error file=$FILE,line=$LINENO::Mismatched .SRCINFO. Update with: makepkg --printsrcinfo > .SRCINFO"
+		exit 1
 	fi
-	(( ++i ))
+
+	# Optionally install dependencies from AUR
+	if [ -n "${INPUT_AURDEPS:-}" ]; then
+		# First install yay
+		pacman -S --noconfirm --needed git
+		git clone https://aur.archlinux.org/yay-bin.git /tmp/yay
+		pushd /tmp/yay
+		chmod -R a+rw .
+		sudo -H -u builder makepkg --syncdeps --install --noconfirm
+		popd
+
+		# Extract dependencies from .SRCINFO (depends or depends_x86_64) and install
+		mapfile -t PKGDEPS < \
+			<(sed -n -e 's/^[[:space:]]*\(make\)\?depends\(_x86_64\)\? = \([[:alnum:][:punct:]]*\)[[:space:]]*$/\3/p' .SRCINFO)
+		sudo -H -u builder yay --sync --noconfirm "${PKGDEPS[@]}"
+	fi
+
+	# Make the builder user the owner of these files
+	# Without this, (e.g. only having every user have read/write access to the files),
+	# makepkg will try to change the permissions of the files itself which will fail since it does not own the files/have permission
+	# we can't do this earlier as it will change files that are for github actions, which results in warnings in github actions logs.
+	chown -R builder .
+
+	# Build packages
+	# INPUT_MAKEPKGARGS is intentionally unquoted to allow arg splitting
+	# shellcheck disable=SC2086
+	sudo -H -u builder makepkg --syncdeps --noconfirm ${INPUT_MAKEPKGARGS:-}
+
+	# Get array of packages to be built
+	mapfile -t PKGFILES < <( sudo -u builder makepkg --packagelist )
+	echo "Package(s): ${PKGFILES[*]}"
+
+	# Report built package archives
+	i=0
+	for PKGFILE in "${PKGFILES[@]}"; do
+		# makepkg reports absolute paths, must be relative for use by other actions
+		RELPKGFILE="$(realpath --relative-base="$BASEDIR" "$PKGFILE")"
+		# Caller arguments to makepkg may mean the pacakge is not built
+		if [ -f "$PKGFILE" ]; then
+			echo "::set-output name=pkgfile$i::$RELPKGFILE"
+		else
+			echo "Archive $RELPKGFILE not built"
+		fi
+		(( ++i ))
+	done
+
+	function prepend () {
+		# Prepend the argument to each input line
+		while read -r line; do
+			echo "$1$line"
+		done
+	}
+
+	function namcap_check() {
+		# Run namcap checks
+		# Installing namcap after building so that makepkg happens on a minimal
+		# install where any missing dependencies can be caught.
+		pacman -S --noconfirm --needed namcap
+
+		NAMCAP_ARGS=()
+		if [ -n "${INPUT_NAMCAPRULES:-}" ]; then
+			NAMCAP_ARGS+=( "-r" "${INPUT_NAMCAPRULES}" )
+		fi
+		if [ -n "${INPUT_NAMCAPEXCLUDERULES:-}" ]; then
+			NAMCAP_ARGS+=( "-e" "${INPUT_NAMCAPEXCLUDERULES}" )
+		fi
+
+		# For reasons that I don't understand, sudo is not resetting '$PATH'
+		# As a result, namcap finds program paths in /usr/sbin instead of /usr/bin
+		# which makes namcap fail to identify the packages that provide the
+		# program and so it emits spurious warnings.
+		# More details: https://bugs.archlinux.org/task/66430
+		#
+		# Work around this issue by putting bin ahead of sbin in $PATH
+		export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+
+		namcap "${NAMCAP_ARGS[@]}" PKGBUILD \
+			| prepend "::warning file=$FILE,line=$LINENO::"
+		for PKGFILE in "${PKGFILES[@]}"; do
+			if [ -f "$PKGFILE" ]; then
+				RELPKGFILE="$(realpath --relative-base="$BASEDIR" "$PKGFILE")"
+				namcap "${NAMCAP_ARGS[@]}" "$PKGFILE" \
+					| prepend "::warning file=$FILE,line=$LINENO::$RELPKGFILE:"
+			fi
+		done
+	}
+
+	if [ -z "${INPUT_NAMCAPDISABLE:-}" ]; then
+		namcap_check
+	fi
+
+	# Move built package(s) to the repo directory
+	mv $GITHUB_WORKSPACE/$element/*.tar.zst $GITHUB_WORKSPACE/repo
+
+	cd $BASEDIR
 done
 
-function prepend () {
-	# Prepend the argument to each input line
-	while read -r line; do
-		echo "$1$line"
-	done
-}
-
-function namcap_check() {
-	# Run namcap checks
-	# Installing namcap after building so that makepkg happens on a minimal
-	# install where any missing dependencies can be caught.
-	pacman -S --noconfirm --needed namcap
-
-	NAMCAP_ARGS=()
-	if [ -n "${INPUT_NAMCAPRULES:-}" ]; then
-		NAMCAP_ARGS+=( "-r" "${INPUT_NAMCAPRULES}" )
-	fi
-	if [ -n "${INPUT_NAMCAPEXCLUDERULES:-}" ]; then
-		NAMCAP_ARGS+=( "-e" "${INPUT_NAMCAPEXCLUDERULES}" )
-	fi
-
-	# For reasons that I don't understand, sudo is not resetting '$PATH'
-	# As a result, namcap finds program paths in /usr/sbin instead of /usr/bin
-	# which makes namcap fail to identify the packages that provide the
-	# program and so it emits spurious warnings.
-	# More details: https://bugs.archlinux.org/task/66430
-	#
-	# Work around this issue by putting bin ahead of sbin in $PATH
-	export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
-
-	namcap "${NAMCAP_ARGS[@]}" PKGBUILD \
-		| prepend "::warning file=$FILE,line=$LINENO::"
-	for PKGFILE in "${PKGFILES[@]}"; do
-		if [ -f "$PKGFILE" ]; then
-			RELPKGFILE="$(realpath --relative-base="$BASEDIR" "$PKGFILE")"
-			namcap "${NAMCAP_ARGS[@]}" "$PKGFILE" \
-				| prepend "::warning file=$FILE,line=$LINENO::$RELPKGFILE:"
-		fi
-	done
-}
-
-if [ -z "${INPUT_NAMCAPDISABLE:-}" ]; then
-	namcap_check
-fi
-
-mkdir $GITHUB_WORKSPACE/repo
-mv $GITHUB_WORKSPACE/$INPUT_PKGDIR/*.tar.zst $GITHUB_WORKSPACE/repo
 cd $GITHUB_WORKSPACE/repo
 repo-add -v $INPUT_REPONAME.db.tar.gz *.zst
 rm $INPUT_REPONAME.db $INPUT_REPONAME.files
 cp $INPUT_REPONAME.db.tar.gz $INPUT_REPONAME.db
 cp $INPUT_REPONAME.files.tar.gz $INPUT_REPONAME.files
-
