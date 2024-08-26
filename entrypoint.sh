@@ -140,7 +140,7 @@ for element in "${array[@]}"; do
 done
 
 cd $GITHUB_WORKSPACE/repo
-repo-add -v $INPUT_REPONAME.db.tar.gz *.zst
+repo-add -v $INPUT_REPONAME.db.tar.gz *.pkg.tar.zst
 rm $INPUT_REPONAME.db $INPUT_REPONAME.files
 cp $INPUT_REPONAME.db.tar.gz $INPUT_REPONAME.db
 cp $INPUT_REPONAME.files.tar.gz $INPUT_REPONAME.files
